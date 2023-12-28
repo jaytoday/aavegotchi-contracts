@@ -7,3 +7,11 @@ bin
 artifacts
 coverage.json
 coverage
+scripts/dep.js
+scripts/portals.js
+hardhat.config.js
+typechain/
+flat
+botDaddies.ts
+botDaddies2.ts
+out

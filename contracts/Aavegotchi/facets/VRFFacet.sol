@@ -1,11 +1,11 @@
-//SPDX-License-Identifier: MIT
-pragma solidity 0.7.6;
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.1;
 
-import "../libraries/LibVrf.sol";
-import "../interfaces/ILink.sol";
-import "../../shared/libraries/LibDiamond.sol";
-import "../libraries/LibAppStorage.sol";
-import "../libraries/LibMeta.sol";
+import {Modifiers} from "../libraries/LibAppStorage.sol";
+import {LibMeta} from "../../shared/libraries/LibMeta.sol";
+import {LibERC721Marketplace} from "../libraries/LibERC721Marketplace.sol";
+import {LibAavegotchi} from "../libraries/LibAavegotchi.sol";
+import {ILink} from "../interfaces/ILink.sol";
 
 //import "hardhat/console.sol";
 
@@ -83,89 +83,85 @@ import "../libraries/LibMeta.sol";
  * @dev until it calls fulfillRandomness().
  */
 
-contract VrfFacet {
+contract VrfFacet is Modifiers {
     event VrfRandomNumber(uint256 indexed tokenId, uint256 randomNumber, uint256 _vrfTimeSet);
+    event OpenPortals(uint256[] _tokenIds);
     event PortalOpened(uint256 indexed tokenId);
-    AppStorage internal s;
-    ILink internal immutable im_link;
-    address internal immutable im_vrfCoordinator;
-
-    constructor(address _vrfCoordinator, address _link) {
-        im_vrfCoordinator = _vrfCoordinator;
-        im_link = ILink(_link);
-    }
 
     /***********************************|
    |            Read Functions          |
    |__________________________________*/
 
-    /*  function vrfInfo()
-        external
-        view
-        returns (
-            // uint256 nextBatchId_,
-            // uint256 nextVrfCallTime_,
-            bool vrfPending_
-        )
-    // uint256 batchCount_
-    {
-        LibVrf.Storage storage vrf_ds = LibVrf.diamondStorage();
-        //  nextBatchId_ = vrf_ds.nextBatchId;
-        //  nextVrfCallTime_ = vrf_ds.nextVrfCallTime;
-        vrfPending_ = vrf_ds;
-        //  batchCount_ = vrf_ds.batchCount;
-    }
-    */
-
     function linkBalance() external view returns (uint256 linkBalance_) {
-        linkBalance_ = im_link.balanceOf(address(this));
+        linkBalance_ = s.link.balanceOf(address(this));
+    }
+
+    function vrfCoordinator() external view returns (address) {
+        return s.vrfCoordinator;
+    }
+
+    function link() external view returns (address) {
+        return address(s.link);
+    }
+
+    function keyHash() external view returns (bytes32) {
+        return s.keyHash;
     }
 
     /***********************************|
    |            Write Functions        |
    |__________________________________*/
 
-    function drawRandomNumber(uint256 _tokenId) public {
-        LibVrf.Storage storage vrf_ds = LibVrf.diamondStorage();
-        require(vrf_ds.tokenIdToVrfPending[_tokenId] == false, "VrfFacet: VRF call is pending");
-        vrf_ds.tokenIdToVrfPending[_tokenId] = true;
-        require(im_link.balanceOf(address(this)) >= vrf_ds.fee, "VrfFacet: Not enough LINK");
-        bytes32 requestId = requestRandomness(vrf_ds.keyHash, vrf_ds.fee, 0);
-        vrf_ds.vrfRequestIdToTokenId[requestId] = _tokenId;
+    // function drawRandomNumbers(uint256[] calldata _tokenIds) external {
+    //     for (uint256 i; i < _tokenIds.length; i++) {
+    //         drawRandomNumber(_tokenIds[i]);
+    //     }
+    // }
+
+    function openPortals(uint256[] calldata _tokenIds) external {
+        address owner = LibMeta.msgSender();
+        for (uint256 i; i < _tokenIds.length; i++) {
+            uint256 tokenId = _tokenIds[i];
+            require(s.aavegotchis[tokenId].status == LibAavegotchi.STATUS_CLOSED_PORTAL, "AavegotchiFacet: Portal is not closed");
+            require(owner == s.aavegotchis[tokenId].owner, "AavegotchiFacet: Only aavegotchi owner can open a portal");
+            require(s.aavegotchis[tokenId].locked == false, "AavegotchiFacet: Can't open portal when it is locked");
+            drawRandomNumber(tokenId);
+            LibERC721Marketplace.cancelERC721Listing(address(this), tokenId, owner);
+        }
+        emit OpenPortals(_tokenIds);
     }
 
-    function requestRandomness(
-        bytes32 _keyHash,
-        uint256 _fee,
-        uint256 _seed
-    ) internal returns (bytes32 requestId) {
-        LibVrf.Storage storage vrf_ds = LibVrf.diamondStorage();
-        im_link.transferAndCall(im_vrfCoordinator, _fee, abi.encode(_keyHash, _seed));
-        // This is the seed passed to VRFCoordinator. The oracle will mix this with
-        // the hash of the block containing this request to obtain the seed/input
-        // which is finally passed to the VRF cryptographic machinery.
-        // So the seed doesn't actually do anything and is left over from an old API.
-        uint256 vRFSeed = makeVRFInputSeed(_keyHash, _seed, address(this), vrf_ds.nonces[_keyHash]);
-        // nonces[_keyHash] must stay in sync with
-        // VRFCoordinator.nonces[_keyHash][this], which was incremented by the above
-        // successful Link.transferAndCall (in VRFCoordinator.randomnessRequest).
-        // This provides protection against the user repeating their input
-        // seed, which would result in a predictable/duplicate output.
-        vrf_ds.nonces[_keyHash]++;
-        return makeRequestId(_keyHash, vRFSeed);
+    function drawRandomNumber(uint256 _tokenId) internal {
+        s.aavegotchis[_tokenId].status = LibAavegotchi.STATUS_VRF_PENDING;
+        uint256 fee = s.fee;
+        require(s.link.balanceOf(address(this)) >= fee, "VrfFacet: Not enough LINK");
+        bytes32 l_keyHash = s.keyHash;
+        require(s.link.transferAndCall(s.vrfCoordinator, fee, abi.encode(l_keyHash, 0)), "VrfFacet: link transfer failed");
+        uint256 vrfSeed = uint256(keccak256(abi.encode(l_keyHash, 0, address(this), s.vrfNonces[l_keyHash])));
+        s.vrfNonces[l_keyHash]++;
+        bytes32 requestId = keccak256(abi.encodePacked(l_keyHash, vrfSeed));
+        s.vrfRequestIdToTokenId[requestId] = _tokenId;
+        // for testing
+        tempFulfillRandomness(requestId, uint256(keccak256(abi.encodePacked(block.number, _tokenId))));
     }
 
-    function makeRequestId(bytes32 _keyHash, uint256 _vRFInputSeed) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(_keyHash, _vRFInputSeed));
-    }
+    // for testing purpose only
+    function tempFulfillRandomness(bytes32 _requestId, uint256 _randomNumber) internal {
+        // console.log("bytes");
+        // console.logBytes32(_requestId);
+        //_requestId; // mentioned here to remove unused variable warning
 
-    function makeVRFInputSeed(
-        bytes32 _keyHash,
-        uint256 _userSeed,
-        address _requester,
-        uint256 _nonce
-    ) internal pure returns (uint256) {
-        return uint256(keccak256(abi.encode(_keyHash, _userSeed, _requester, _nonce)));
+        uint256 tokenId = s.vrfRequestIdToTokenId[_requestId];
+
+        // console.log("token id:", tokenId);
+
+        // require(LibMeta.msgSender() == im_vrfCoordinator, "Only VRFCoordinator can fulfill");
+        require(s.aavegotchis[tokenId].status == LibAavegotchi.STATUS_VRF_PENDING, "VrfFacet: VRF is not pending");
+        s.aavegotchis[tokenId].status = LibAavegotchi.STATUS_OPEN_PORTAL;
+        s.tokenIdToRandomNumber[tokenId] = _randomNumber;
+
+        emit PortalOpened(tokenId);
+        emit VrfRandomNumber(tokenId, _randomNumber, block.timestamp);
     }
 
     /**
@@ -181,37 +177,45 @@ contract VrfFacet {
      * @param _randomNumber the VRF output
      */
     function rawFulfillRandomness(bytes32 _requestId, uint256 _randomNumber) external {
-        // console.log("bytes");
-        // console.logBytes32(_requestId);
-        _requestId; // mentioned here to remove unused variable warning
-        LibVrf.Storage storage vrf_ds = LibVrf.diamondStorage();
-        uint256 tokenId = vrf_ds.vrfRequestIdToTokenId[_requestId];
+        uint256 tokenId = s.vrfRequestIdToTokenId[_requestId];
 
-        // console.log("token id:", tokenId);
+        require(LibMeta.msgSender() == s.vrfCoordinator, "Only VRFCoordinator can fulfill");
 
-        require(LibMeta.msgSender() == im_vrfCoordinator, "Only VRFCoordinator can fulfill");
-
-        require(vrf_ds.tokenIdToVrfPending[tokenId] == true, "VrfFacet: VRF is not pending");
-        vrf_ds.tokenIdToVrfPending[tokenId] = false;
-
+        require(s.aavegotchis[tokenId].status == LibAavegotchi.STATUS_VRF_PENDING, "VrfFacet: VRF is not pending");
+        s.aavegotchis[tokenId].status = LibAavegotchi.STATUS_OPEN_PORTAL;
         s.tokenIdToRandomNumber[tokenId] = _randomNumber;
-        s.aavegotchis[tokenId].status = LibAppStorage.STATUS_OPEN_PORTAL;
 
         emit PortalOpened(tokenId);
         emit VrfRandomNumber(tokenId, _randomNumber, block.timestamp);
     }
 
-    // Change the fee amount that is paid for VRF random numbers
-    function changeVRFFee(uint256 _newFee, bytes32 _keyHash) external {
-        require(LibMeta.msgSender() == LibDiamond.contractOwner(), "VrfFacet: Must be contract owner");
-        LibVrf.Storage storage vrf_ds = LibVrf.diamondStorage();
-        vrf_ds.fee = uint96(_newFee);
-        vrf_ds.keyHash = _keyHash;
+    ///@notice Allow the aavegotchi diamond owner to change the vrf details
+    //@param _newFee New VRF fee (in LINK)
+    //@param _keyHash New keyhash
+    //@param _vrfCoordinator The new vrf coordinator address
+    //@param _link New LINK token contract address
+    function changeVrf(
+        uint256 _newFee,
+        bytes32 _keyHash,
+        address _vrfCoordinator,
+        address _link
+    ) external onlyOwner {
+        if (_newFee != 0) {
+            s.fee = uint96(_newFee);
+        }
+        if (_keyHash != 0) {
+            s.keyHash = _keyHash;
+        }
+        if (_vrfCoordinator != address(0)) {
+            s.vrfCoordinator = _vrfCoordinator;
+        }
+        if (_link != address(0)) {
+            s.link = ILink(_link);
+        }
     }
 
     // Remove the LINK tokens from this contract that are used to pay for VRF random number fees
-    function removeLinkTokens(address _to, uint256 _value) external {
-        require(LibMeta.msgSender() == LibDiamond.contractOwner(), "VrfFacet: Must be contract owner");
-        im_link.transfer(_to, _value);
+    function removeLinkTokens(address _to, uint256 _value) external onlyOwner {
+        s.link.transfer(_to, _value);
     }
 }

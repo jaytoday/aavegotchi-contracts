@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.7.6;
+pragma solidity 0.8.1;
 
-import "../libraries/LibAppStorage.sol";
+import {AppStorage} from "../libraries/LibAppStorage.sol";
 
 contract MetaTransactionsFacet {
     AppStorage internal s;
@@ -20,8 +20,8 @@ contract MetaTransactionsFacet {
         }
     }
 
-    function getDomainSeperator() private view returns (bytes32) {
-        return s.domainSeperator;
+    function getDomainSeparator() private view returns (bytes32) {
+        return s.domainSeparator;
     }
 
     /**
@@ -32,13 +32,16 @@ contract MetaTransactionsFacet {
      * "\\x01" is the version byte to make it compatible to EIP-191
      */
     function toTypedMessageHash(bytes32 messageHash) internal view returns (bytes32) {
-        return keccak256(abi.encodePacked("\x19\x01", getDomainSeperator(), messageHash));
+        return keccak256(abi.encodePacked("\x19\x01", getDomainSeparator(), messageHash));
     }
 
     function hashMetaTransaction(MetaTransaction memory metaTx) internal pure returns (bytes32) {
         return keccak256(abi.encode(META_TRANSACTION_TYPEHASH, metaTx.nonce, metaTx.from, keccak256(metaTx.functionSignature)));
     }
 
+    ///@notice Query the latest nonce of an address
+    ///@param user Address to query
+    ///@return nonce_ The latest nonce for the address
     function getNonce(address user) external view returns (uint256 nonce_) {
         nonce_ = s.metaNonces[user];
     }
@@ -83,7 +86,7 @@ contract MetaTransactionsFacet {
         (bool success, bytes memory returnData) = address(this).call(abi.encodePacked(functionSignature, userAddress));
 
         require(success, "Function call not successful");
-        emit MetaTransactionExecuted(userAddress, msg.sender, functionSignature);
+        emit MetaTransactionExecuted(userAddress, payable(msg.sender), functionSignature);
         return returnData;
     }
 }

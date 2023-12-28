@@ -1,182 +1,26 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.7.6;
-pragma experimental ABIEncoderV2;
+pragma solidity 0.8.1;
 
-import "../libraries/LibAppStorage.sol";
-import "../../shared/interfaces/IERC20.sol";
-import "../libraries/LibStrings.sol";
-import "../libraries/LibSvg.sol";
-import "../../shared/libraries/LibDiamond.sol";
-import "../../shared/libraries/LibERC20.sol";
-import "./VrfFacet.sol";
+import {LibAavegotchi, AavegotchiInfo} from "../libraries/LibAavegotchi.sol";
+
+import {LibStrings} from "../../shared/libraries/LibStrings.sol";
+import {AppStorage, Modifiers} from "../libraries/LibAppStorage.sol";
+import {LibGotchiLending} from "../libraries/LibGotchiLending.sol";
 // import "hardhat/console.sol";
-import "../CollateralEscrow.sol";
-import "../libraries/LibVrf.sol";
-import "../libraries/LibMeta.sol";
+import {LibMeta} from "../../shared/libraries/LibMeta.sol";
+import {LibERC721Marketplace} from "../libraries/LibERC721Marketplace.sol";
+import {LibERC721} from "../../shared/libraries/LibERC721.sol";
+import {IERC721TokenReceiver} from "../../shared/interfaces/IERC721TokenReceiver.sol";
 
-/// @dev Note: the ERC-165 identifier for this interface is 0x150b7a02.
-interface ERC721TokenReceiver {
-    /// @notice Handle the receipt of an NFT
-    /// @dev The ERC721 smart contract calls this function on the recipient
-    ///  after a `transfer`. This function MAY throw to revert and reject the
-    ///  transfer. Return of other than the magic value MUST result in the
-    ///  transaction being reverted.
-    ///  Note: the contract address is always the message sender.
-    /// @param _operator The address which called `safeTransferFrom` function
-    /// @param _from The address which previously owned the token
-    /// @param _tokenId The NFT identifier which is being transferred
-    /// @param _data Additional data with no specified format
-    /// @return `bytes4(keccak256("onERC721Received(address,address,uint256,bytes)"))`
-    ///  unless throwing
-    function onERC721Received(
-        address _operator,
-        address _from,
-        uint256 _tokenId,
-        bytes calldata _data
-    ) external returns (bytes4);
-}
+import {ForgeFacet} from "../ForgeDiamond/facets/ForgeFacet.sol";
 
-contract AavegotchiFacet is LibAppStorageModifiers {
-    bytes4 private constant ERC721_RECEIVED = 0x150b7a02;
-    uint256 internal constant EQUIPPED_WEARABLE_SLOTS = 16;
-    uint256 internal constant PORTAL_AAVEGOTCHIS_NUM = 10;
+contract AavegotchiFacet is Modifiers {
+    event PetOperatorApprovalForAll(address indexed _owner, address indexed _operator, bool _approved);
 
-    /***********************************|
-   |             Events                |
-   |__________________________________*/
-
-    // event AavegotchiBatched(uint256 indexed _batchId, uint256[] tokenIds);
-    event Transfer(address indexed _from, address indexed _to, uint256 indexed _tokenId);
-    event TransferSingle(address indexed _operator, address indexed _from, address indexed _to, uint256 _id, uint256 _value);
-
-    /// @dev This emits when the approved address for an NFT is changed or
-    ///  reaffirmed. The zero address indicates there is no approved address.
-    ///  When a Transfer event emits, this also indicates that the approved
-    ///  address for that NFT (if any) is reset to none.
-    event Approval(address indexed _owner, address indexed _approved, uint256 indexed _tokenId);
-
-    /// @dev This emits when an operator is enabled or disabled for an owner.
-    ///  The operator can manage all NFTs of the owner.
-    event ApprovalForAll(address indexed _owner, address indexed _operator, bool _approved);
-
-    event OpenPortals(uint256[] _tokenIds);
-
-    event ClaimAavegotchi(uint256 indexed _tokenId);
-
-    event SetAavegotchiName(uint256 indexed _tokenId, string _oldName, string _newName);
-
-    event SetBatchId(uint256 indexed _batchId, uint256[] tokenIds);
-
-    event SpendSkillpoints(uint256 indexed _tokenId, int8[4] _values);
-
-    event LockAavegotchi(uint256 indexed _tokenId, uint256 _lockDuration);
-
-    /***********************************|
-   |             Read Functions         |
-   |__________________________________*/
-
+    ///@notice Query the universal totalSupply of all NFTs ever minted
+    ///@return totalSupply_ the number of all NFTs that have been minted
     function totalSupply() external view returns (uint256 totalSupply_) {
-        totalSupply_ = s.totalSupply;
-    }
-
-    function aavegotchiNameAvailable(string memory _name) external view returns (bool available_) {
-        available_ = s.aavegotchiNamesUsed[_name];
-    }
-
-    function currentHaunt() public view returns (uint16 hauntId_, Haunt memory haunt_) {
-        hauntId_ = s.currentHauntId;
-        haunt_ = s.haunts[hauntId_];
-    }
-
-    struct RevenueSharesIO {
-        address burnAddress;
-        address daoAddress;
-        address rarityFarming;
-        address pixelCraft;
-    }
-
-    function revenueShares() external view returns (RevenueSharesIO memory) {
-        return RevenueSharesIO(0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF, s.daoTreasury, s.rarityFarming, s.pixelCraft);
-    }
-
-    struct InternalPortalAavegotchiTraitsIO {
-        uint256 randomNumber;
-        uint256 numericTraits;
-        address collateralType;
-        uint256 minimumStake;
-    }
-
-    function toNumericTraits(uint256 _randomNumber, uint256 _modifiers) internal pure returns (uint256 numericTraits_) {
-        for (uint256 i; i < LibAppStorage.NUMERIC_TRAITS_NUM; i++) {
-            uint256 value = uint8(_randomNumber >> (i * 8));
-            if (value > 99) {
-                value /= 2;
-                if (value > 99) {
-                    value = uint256(keccak256(abi.encodePacked(_randomNumber, i))) % 100;
-                }
-            }
-            int256 mod = int8(_modifiers >> (i * 8));
-            // set slot
-            numericTraits_ |= uint256((int256(value) + mod) & 0xffff) << (16 * i);
-        }
-    }
-
-    function singlePortalAavegotchiTraits(uint256 _randomNumber, uint256 _option)
-        internal
-        view
-        returns (InternalPortalAavegotchiTraitsIO memory singlePortalAavegotchiTraits_)
-    {
-        uint256 randomNumberN = uint256(keccak256(abi.encodePacked(_randomNumber, _option)));
-        singlePortalAavegotchiTraits_.randomNumber = randomNumberN;
-        address collateralType = s.collateralTypes[randomNumberN % s.collateralTypes.length];
-        singlePortalAavegotchiTraits_.numericTraits = toNumericTraits(randomNumberN, s.collateralTypeInfo[collateralType].modifiers);
-        singlePortalAavegotchiTraits_.collateralType = collateralType;
-
-        AavegotchiCollateralTypeInfo memory collateralInfo = s.collateralTypeInfo[collateralType];
-        uint16 conversionRate = collateralInfo.conversionRate;
-
-        //Get rarity multiplier
-        uint256 multiplier = rarityMultiplier(singlePortalAavegotchiTraits_.numericTraits);
-
-        //First we get the base price of our collateral in terms of DAI
-        uint256 collateralDAIPrice = ((10**IERC20(collateralType).decimals()) / conversionRate);
-
-        //Then multiply by the rarity multiplier
-        singlePortalAavegotchiTraits_.minimumStake = collateralDAIPrice * multiplier;
-    }
-
-    struct PortalAavegotchiTraitsIO {
-        uint256 randomNumber;
-        int256[] numericTraits;
-        uint256 numericTraitsUint;
-        address collateralType;
-        uint256 minimumStake;
-    }
-
-    function portalAavegotchiTraits(uint256 _tokenId)
-        external
-        view
-        returns (PortalAavegotchiTraitsIO[PORTAL_AAVEGOTCHIS_NUM] memory portalAavegotchiTraits_)
-    {
-        require(s.aavegotchis[_tokenId].status == LibAppStorage.STATUS_OPEN_PORTAL, "AavegotchiFacet: Portal not open");
-
-        uint256 randomNumber = s.tokenIdToRandomNumber[_tokenId];
-
-        for (uint256 i; i < portalAavegotchiTraits_.length; i++) {
-            InternalPortalAavegotchiTraitsIO memory single = singlePortalAavegotchiTraits(randomNumber, i);
-            portalAavegotchiTraits_[i].randomNumber = single.randomNumber;
-            portalAavegotchiTraits_[i].collateralType = single.collateralType;
-            portalAavegotchiTraits_[i].minimumStake = single.minimumStake;
-            portalAavegotchiTraits_[i].numericTraitsUint = single.numericTraits;
-            portalAavegotchiTraits_[i].numericTraits = new int256[](LibAppStorage.NUMERIC_TRAITS_NUM);
-            for (uint256 j; j < LibAppStorage.NUMERIC_TRAITS_NUM; j++) {
-                portalAavegotchiTraits_[i].numericTraits[j] = int16(single.numericTraits >> (j * 16));
-            }
-        }
-    }
-
-    function ghstAddress() external view returns (address contract_) {
-        contract_ = s.ghstContract;
+        totalSupply_ = s.tokenIds.length;
     }
 
     /// @notice Count all NFTs assigned to an owner
@@ -185,208 +29,70 @@ contract AavegotchiFacet is LibAppStorageModifiers {
     /// @param _owner An address for whom to query the balance
     /// @return balance_ The number of NFTs owned by `_owner`, possibly zero
     function balanceOf(address _owner) external view returns (uint256 balance_) {
-        balance_ = s.aavegotchiBalance[_owner];
+        require(_owner != address(0), "AavegotchiFacet: _owner can't be address(0)");
+        balance_ = s.ownerTokenIds[_owner].length;
     }
 
-    struct AavegotchiInfo {
-        uint256 tokenId;
-        string name;
-        address owner;
-        uint256 randomNumber;
-        uint256 status;
-        int256[] numericTraits;
-        int256[] modifiedNumericTraits;
-        uint256[EQUIPPED_WEARABLE_SLOTS] equippedWearables;
-        address collateral;
-        address escrow;
-        uint256 stakedAmount;
-        uint256 minimumStake;
-        //New
-        uint256 kinship; //The kinship value of this Aavegotchi. Default is 50.
-        uint256 lastInteracted;
-        uint256 experience; //How much XP this Aavegotchi has accrued. Begins at 0.
-        uint256 toNextLevel;
-        uint256 usedSkillPoints; //number of skill points used
-        uint256 level; //the current aavegotchi level
-        uint256 hauntId;
-        uint256 baseRarityScore;
-        uint256 modifiedRarityScore;
-        bool locked;
-        uint256 unlockTime;
+    ///@notice Query all details relating to an NFT
+    ///@param _tokenId the identifier of the NFT to query
+    ///@return aavegotchiInfo_ a struct containing all details about
+    function getAavegotchi(uint256 _tokenId) external view returns (AavegotchiInfo memory aavegotchiInfo_) {
+        aavegotchiInfo_ = LibAavegotchi.getAavegotchi(_tokenId);
     }
 
-    function getNumericTraits(uint256 _tokenId) public view returns (uint256 numericTraits_) {
-        //Check if trait boosts from consumables are still valid
-        int256 boostDecay = int256((block.timestamp - s.aavegotchis[_tokenId].lastTemporaryBoost) / 24 hours);
-        uint256 temporaryTraitBoosts = s.aavegotchis[_tokenId].temporaryTraitBoosts;
-        uint256 numericTraits = s.aavegotchis[_tokenId].numericTraits;
-        for (uint256 i; i < LibAppStorage.NUMERIC_TRAITS_NUM; i++) {
-            int256 number = int16(numericTraits >> (i * 16));
-            int256 boost = int8(temporaryTraitBoosts >> (i * 8));
-
-            if (boost > 0) {
-                if (boost > boostDecay) {
-                    number += boost - boostDecay;
-                }
-            } else {
-                if ((boost * -1) > boostDecay) {
-                    number += boost + boostDecay;
-                }
-            }
-            numericTraits_ |= uint256(number & 0xffff) << (i * 16);
-        }
+    ///@notice returns the time an NFT was claimed
+    ///@dev will return 0 if the NFT is still an unclaimed portal
+    ///@param _tokenId the identifier of the NFT
+    ///@return claimTime_ the time the NFT was claimed
+    function aavegotchiClaimTime(uint256 _tokenId) external view returns (uint256 claimTime_) {
+        claimTime_ = s.aavegotchis[_tokenId].claimTime;
     }
 
-    function getAavegotchi(uint256 _tokenId) public view returns (AavegotchiInfo memory aavegotchiInfo_) {
-        aavegotchiInfo_.tokenId = _tokenId;
-        aavegotchiInfo_.owner = s.aavegotchis[_tokenId].owner;
-        aavegotchiInfo_.randomNumber = s.aavegotchis[_tokenId].randomNumber;
-        aavegotchiInfo_.status = s.aavegotchis[_tokenId].status;
-        aavegotchiInfo_.hauntId = s.aavegotchis[_tokenId].hauntId;
-        if (aavegotchiInfo_.status == LibAppStorage.STATUS_AAVEGOTCHI) {
-            aavegotchiInfo_.name = s.aavegotchis[_tokenId].name;
-            uint256 l_equippedWearables = s.aavegotchis[_tokenId].equippedWearables;
-            for (uint16 i; i < EQUIPPED_WEARABLE_SLOTS; i++) {
-                aavegotchiInfo_.equippedWearables[i] = uint16(l_equippedWearables >> (i * 16));
-            }
-            aavegotchiInfo_.collateral = s.aavegotchis[_tokenId].collateralType;
-            aavegotchiInfo_.escrow = s.aavegotchis[_tokenId].escrow;
-            aavegotchiInfo_.stakedAmount = IERC20(aavegotchiInfo_.collateral).balanceOf(aavegotchiInfo_.escrow);
-            aavegotchiInfo_.minimumStake = s.aavegotchis[_tokenId].minimumStake;
-            aavegotchiInfo_.kinship = kinship(_tokenId);
-            aavegotchiInfo_.lastInteracted = s.aavegotchis[_tokenId].lastInteracted;
-            aavegotchiInfo_.experience = s.aavegotchis[_tokenId].experience;
-            aavegotchiInfo_.toNextLevel = xpUntilNextLevel(s.aavegotchis[_tokenId].experience);
-            aavegotchiInfo_.level = LibAppStorage.aavegotchiLevel(s.aavegotchis[_tokenId].experience);
-            aavegotchiInfo_.usedSkillPoints = s.aavegotchis[_tokenId].usedSkillPoints;
-            uint256 numericTraits = s.aavegotchis[_tokenId].numericTraits;
-            aavegotchiInfo_.numericTraits = new int256[](LibAppStorage.NUMERIC_TRAITS_NUM);
-            for (uint256 i; i < LibAppStorage.NUMERIC_TRAITS_NUM; i++) {
-                aavegotchiInfo_.numericTraits[i] = int16(numericTraits >> (i * 16));
-            }
-            aavegotchiInfo_.baseRarityScore = baseRarityScore(numericTraits);
-            (aavegotchiInfo_.modifiedNumericTraits, aavegotchiInfo_.modifiedRarityScore) = modifiedTraitsAndRarityScore(_tokenId);
-            aavegotchiInfo_.locked = s.aavegotchis[_tokenId].unlockTime >= block.timestamp;
-            if (aavegotchiInfo_.locked) {
-                aavegotchiInfo_.unlockTime = s.aavegotchis[_tokenId].unlockTime;
-            }
-        }
-        return aavegotchiInfo_;
+    // /// @notice Enumerate valid NFTs
+    // /// @dev Throws if `_index` >= `totalSupply()`.
+    // /// @param _index A counter less than `totalSupply()`
+    // /// @return The token identifier for the `_index`th NFT,
+    // ///  (sort order not specified)
+    function tokenByIndex(uint256 _index) external view returns (uint256 tokenId_) {
+        require(_index < s.tokenIds.length, "AavegotchiFacet: index beyond supply");
+        tokenId_ = s.tokenIds[_index];
     }
 
-    function availableSkillPoints(uint256 _tokenId) public view returns (uint256) {
-        uint256 level = LibAppStorage.aavegotchiLevel(s.aavegotchis[_tokenId].experience);
-        uint256 skillPoints = (level / 3);
-        uint256 usedSkillPoints = s.aavegotchis[_tokenId].usedSkillPoints;
-        require(skillPoints >= usedSkillPoints, "AavegotchiFacet: Used skill points is greater than skill points");
-        return skillPoints - usedSkillPoints;
+    // /// @notice Enumerate NFTs assigned to an owner
+    // /// @dev Throws if `_index` >= `balanceOf(_owner)` or if
+    // ///  `_owner` is the zero address, representing invalid NFTs.
+    // /// @param _owner An address where we are interested in NFTs owned by them
+    // /// @param _index A counter less than `balanceOf(_owner)`
+    // /// @return The token identifier for the `_index`th NFT assigned to `_owner`,
+    // ///   (sort order not specified)
+    function tokenOfOwnerByIndex(address _owner, uint256 _index) external view returns (uint256 tokenId_) {
+        require(_index < s.ownerTokenIds[_owner].length, "AavegotchiFacet: index beyond owner balance");
+        tokenId_ = s.ownerTokenIds[_owner][_index];
     }
 
-    function abs(int8 x) private pure returns (uint256) {
-        require(x != -128, "AavegotchiFacet: x can't be -128");
-        return uint256(x >= 0 ? x : -x);
+    /// @notice Get all the Ids of NFTs owned by an address
+    /// @param _owner The address to check for the NFTs
+    /// @return tokenIds_ an array of unsigned integers,each representing the tokenId of each NFT
+    function tokenIdsOfOwner(address _owner) external view returns (uint32[] memory tokenIds_) {
+        tokenIds_ = s.ownerTokenIds[_owner];
     }
 
-    function aavegotchiLevel(uint32 _experience) public pure returns (uint256 level_) {
-        level_ = LibAppStorage.aavegotchiLevel(_experience);
-    }
-
-    function xpUntilNextLevel(uint32 _experience) public pure returns (uint256 requiredXp_) {
-        uint256 currentLevel = aavegotchiLevel(_experience);
-        requiredXp_ = (((currentLevel)**2) * 50) - _experience;
-    }
-
-    function rarityMultiplier(uint256 _numericTraits) public pure returns (uint256 multiplier) {
-        uint256 rarityScore = baseRarityScore(_numericTraits);
-        if (rarityScore < 300) return 10;
-        else if (rarityScore >= 300 && rarityScore < 450) return 10;
-        else if (rarityScore >= 450 && rarityScore <= 525) return 25;
-        else if (rarityScore >= 526 && rarityScore <= 580) return 100;
-        else if (rarityScore >= 581) return 1000;
-    }
-
-    //Calculates the base rarity score, including collateral modifier
-    function baseRarityScore(uint256 _numericTraits) public pure returns (uint256 _rarityScore) {
-        for (uint256 i; i < LibAppStorage.NUMERIC_TRAITS_NUM; i++) {
-            int256 number = int16(_numericTraits >> (i * 16));
-            if (number >= 50) {
-                _rarityScore += uint256(number);
-            } else {
-                _rarityScore += uint256(int256(100) - number);
-            }
-        }
-    }
-
-    //Only valid for claimed Aavegotchis
-    function modifiedTraitsAndRarityScore(uint256 _tokenId) public view returns (int256[] memory numericTraits_, uint256 rarityScore_) {
-        require(s.aavegotchis[_tokenId].status == LibAppStorage.STATUS_AAVEGOTCHI, "AavegotchiFacet: Must be claimed");
-        numericTraits_ = new int256[](LibAppStorage.NUMERIC_TRAITS_NUM);
-        Aavegotchi storage aavegotchi = s.aavegotchis[_tokenId];
-        uint256 equippedWearables = aavegotchi.equippedWearables;
-        uint256 numericTraitsUint = getNumericTraits(_tokenId);
-        uint256 wearableBonus;
-        for (uint256 slot; slot < EQUIPPED_WEARABLE_SLOTS; slot++) {
-            uint256 wearableId = uint16(equippedWearables >> (16 * slot));
-            if (wearableId == 0) {
-                continue;
-            }
-            ItemType storage itemType = s.itemTypes[wearableId];
-            //Add on trait modifiers
-            uint256 traitModifiers = itemType.traitModifiers;
-            uint256 newNumericTraits;
-            for (uint256 j; j < LibAppStorage.NUMERIC_TRAITS_NUM; j++) {
-                int256 number = int16(numericTraitsUint >> (j * 16));
-                int256 traitModifier = int8(traitModifiers >> (j * 8));
-                number += traitModifier;
-                // clear bits first then assign
-                newNumericTraits |= (uint256(number) & 0xffff) << (j * 16);
-            }
-
-            numericTraitsUint = newNumericTraits;
-            wearableBonus += itemType.rarityScoreModifier;
-        }
-        uint256 baseRarity = baseRarityScore(numericTraitsUint);
-        rarityScore_ = baseRarity + wearableBonus;
-        for (uint256 i; i < LibAppStorage.NUMERIC_TRAITS_NUM; i++) {
-            int256 number = int16(numericTraitsUint >> (i * 16));
-            numericTraits_[i] = number;
-        }
-    }
-
-    function kinship(uint256 _tokenId) public view returns (uint256 score_) {
-        Aavegotchi storage aavegotchi = s.aavegotchis[_tokenId];
-        uint256 lastInteracted = aavegotchi.lastInteracted;
-        uint256 interactionCount = aavegotchi.interactionCount;
-        uint256 interval = block.timestamp - lastInteracted;
-
-        uint256 daysSinceInteraction = interval / 24 hours;
-
-        if (interactionCount > daysSinceInteraction) {
-            score_ = interactionCount - daysSinceInteraction;
-        }
-    }
-
-    function allAavegotchiIdsOfOwner(address _owner) external view returns (uint256[] memory tokenIds_) {
-        tokenIds_ = new uint256[](s.aavegotchiBalance[_owner]);
-        uint256 l_totalSupply = s.totalSupply;
-        uint256 ownerIndex;
-        for (uint256 tokenId; tokenId < l_totalSupply; tokenId++) {
-            if (_owner == s.aavegotchis[tokenId].owner) {
-                tokenIds_[ownerIndex] = tokenId;
-                ownerIndex++;
-            }
-        }
-    }
-
+    /// @notice Get all details about all the NFTs owned by an address
+    /// @param _owner The address to check for the NFTs
+    /// @return aavegotchiInfos_ an array of structs,where each struct contains all the details of each NFT
     function allAavegotchisOfOwner(address _owner) external view returns (AavegotchiInfo[] memory aavegotchiInfos_) {
-        aavegotchiInfos_ = new AavegotchiInfo[](s.aavegotchiBalance[_owner]);
-        uint256 l_totalSupply = s.totalSupply;
-        uint256 ownerIndex;
-        for (uint256 tokenId; tokenId < l_totalSupply; tokenId++) {
-            if (_owner == s.aavegotchis[tokenId].owner) {
-                aavegotchiInfos_[ownerIndex] = getAavegotchi(tokenId);
-                ownerIndex++;
-            }
+        uint256 length = s.ownerTokenIds[_owner].length;
+        aavegotchiInfos_ = new AavegotchiInfo[](length);
+        for (uint256 i; i < length; i++) {
+            aavegotchiInfos_[i] = LibAavegotchi.getAavegotchi(s.ownerTokenIds[_owner][i]);
+        }
+    }
+
+    function batchOwnerOf(uint256[] calldata _tokenIds) external view returns (address[] memory owners_) {
+        owners_ = new address[](_tokenIds.length);
+        for (uint256 i = 0; i < _tokenIds.length; i++) {
+            owners_[i] = s.aavegotchis[_tokenIds[i]].owner;
+            require(owners_[i] != address(0), "AavegotchiFacet: invalid _tokenId");
         }
     }
 
@@ -397,6 +103,7 @@ contract AavegotchiFacet is LibAppStorageModifiers {
     /// @return owner_ The address of the owner of the NFT
     function ownerOf(uint256 _tokenId) external view returns (address owner_) {
         owner_ = s.aavegotchis[_tokenId].owner;
+        require(owner_ != address(0), "AavegotchiFacet: invalid _tokenId");
     }
 
     /// @notice Get the approved address for a single NFT
@@ -404,7 +111,7 @@ contract AavegotchiFacet is LibAppStorageModifiers {
     /// @param _tokenId The NFT to find the approved address for
     /// @return approved_ The approved address for this NFT, or the zero address if there is none
     function getApproved(uint256 _tokenId) external view returns (address approved_) {
-        require(_tokenId < s.totalSupply, "ERC721: tokenId is invalid");
+        require(_tokenId < s.tokenIds.length, "ERC721: tokenId is invalid");
         approved_ = s.approved[_tokenId];
     }
 
@@ -416,109 +123,17 @@ contract AavegotchiFacet is LibAppStorageModifiers {
         approved_ = s.operators[_owner][_operator];
     }
 
-    /***********************************|
-   |             Write Functions        |
-   |__________________________________*/
-
-    function openPortals(uint256[] calldata _tokenIds) external {
-        for (uint256 i; i < _tokenIds.length; i++) {
-            uint256 tokenId = _tokenIds[i];
-            require(s.aavegotchis[tokenId].status == LibAppStorage.STATUS_CLOSED_PORTAL, "AavegotchiFacet: Portal is not closed");
-            require(LibMeta.msgSender() == s.aavegotchis[tokenId].owner, "AavegotchiFacet: Only aavegotchi owner can open a portal");
-
-            VrfFacet(address(this)).drawRandomNumber(tokenId);
-            s.aavegotchis[tokenId].status = LibAppStorage.STATUS_VRF_PENDING;
-        }
-        emit OpenPortals(_tokenIds);
+    ///@notice Check if an address `_operator` is an authorized pet operator for another address `_owner`
+    ///@param _owner address of the lender of the NFTs
+    ///@param _operator address that acts pets the gotchis on behalf of the owner
+    ///@return approved_ true if `operator` is an approved pet operator, False if otherwise
+    function isPetOperatorForAll(address _owner, address _operator) external view returns (bool approved_) {
+        approved_ = s.petOperators[_owner][_operator];
     }
 
-    function claimAavegotchi(
-        uint256 _tokenId,
-        uint256 _option,
-        uint256 _stakeAmount
-    ) external onlyAavegotchiOwner(_tokenId) {
-        Aavegotchi storage aavegotchi = s.aavegotchis[_tokenId];
-        require(aavegotchi.status == LibAppStorage.STATUS_OPEN_PORTAL, "AavegotchiFacet: Portal not open");
-        require(_option < PORTAL_AAVEGOTCHIS_NUM, "AavegotchiFacet: Only 10 aavegotchi options available");
-
-        uint256 randomNumber = s.tokenIdToRandomNumber[_tokenId];
-
-        InternalPortalAavegotchiTraitsIO memory option = singlePortalAavegotchiTraits(randomNumber, _option);
-        aavegotchi.randomNumber = option.randomNumber;
-        aavegotchi.numericTraits = option.numericTraits;
-        aavegotchi.collateralType = option.collateralType;
-        aavegotchi.minimumStake = uint88(option.minimumStake);
-        aavegotchi.lastInteracted = uint40(block.timestamp - 12 hours);
-        aavegotchi.interactionCount = 50;
-        aavegotchi.claimTime = uint40(block.timestamp);
-
-        require(_stakeAmount >= option.minimumStake, "AavegotchiFacet: _stakeAmount less than minimum stake");
-
-        aavegotchi.status = LibAppStorage.STATUS_AAVEGOTCHI;
-        emit ClaimAavegotchi(_tokenId);
-
-        address escrow = address(new CollateralEscrow(option.collateralType));
-        aavegotchi.escrow = escrow;
-        LibERC20.transferFrom(option.collateralType, LibMeta.msgSender(), escrow, _stakeAmount);
-    }
-
-    function setAavegotchiName(uint256 _tokenId, string memory _name) external onlyUnlocked(_tokenId) onlyAavegotchiOwner(_tokenId) {
-        require(bytes(_name).length > 0, "AavegotchiFacet: _name can't be empty");
-        require(s.aavegotchis[_tokenId].status == LibAppStorage.STATUS_AAVEGOTCHI, "AavegotchiFacet: Must choose Aavegotchi before setting name");
-        require(bytes(_name).length < 26, "AavegotchiFacet: _name can't be greater than 25 characters");
-        require(s.aavegotchiNamesUsed[_name] == false, "AavegotchiFacet: Aavegotchi name used already");
-        string memory existingName = s.aavegotchis[_tokenId].name;
-        if (bytes(existingName).length > 0) {
-            delete s.aavegotchiNamesUsed[existingName];
-        }
-        s.aavegotchiNamesUsed[_name] = true;
-        s.aavegotchis[_tokenId].name = _name;
-        emit SetAavegotchiName(_tokenId, existingName, _name);
-    }
-
-    function interact(uint256[] calldata _tokenIds) external {
-        for (uint256 i; i < _tokenIds.length; i++) {
-            uint256 tokenId = _tokenIds[i];
-            address owner = s.aavegotchis[tokenId].owner;
-            require(owner != address(0), "AavegotchiFacet: Invalid tokenId, is not owned or doesn't exist");
-            require(
-                LibMeta.msgSender() == owner || s.operators[owner][LibMeta.msgSender()] || s.approved[tokenId] == LibMeta.msgSender(),
-                "AavegotchiFacet: Not owner of token or approved"
-            );
-            LibAppStorage.interact(tokenId);
-        }
-    }
-
-    function spendSkillPoints(uint256 _tokenId, int8[4] calldata _values) external onlyUnlocked(_tokenId) onlyAavegotchiOwner(_tokenId) {
-        uint256 numericTraits = s.aavegotchis[_tokenId].numericTraits;
-        //To test (Dan): Prevent underflow (is this ok?), see require below
-        uint256 totalUsed = 0;
-        for (uint8 index = 0; index < _values.length; index++) {
-            totalUsed += abs(_values[index]);
-
-            uint256 position = index * 16;
-            // get trait
-            int256 trait = int16(numericTraits >> position);
-            trait += _values[index];
-            // clear trait value
-            numericTraits &= ~(uint256(0xffff) << position);
-            // set trait value
-            numericTraits |= uint256(trait & 0xffff) << position;
-        }
-        // handles underflow
-        require(availableSkillPoints(_tokenId) >= totalUsed, "AavegotchiFacet: Not enough skill points");
-        s.aavegotchis[_tokenId].numericTraits = numericTraits;
-        //Increment used skill points
-        s.aavegotchis[_tokenId].usedSkillPoints += uint16(totalUsed);
-        emit SpendSkillpoints(_tokenId, _values);
-    }
-
-    /**@notice Prevnts assets and items from being moved from Aavegotchi during lock period, except by gameManager. */
-    function lockAavegotchi(uint256 _tokenId, uint256 _lockDuration) external onlyUnlocked(_tokenId) {
-        require(s.aavegotchis[_tokenId].status == LibAppStorage.STATUS_AAVEGOTCHI, "AavegotchiFacet: Must be claimed");
-        require(LibMeta.msgSender() == s.aavegotchis[_tokenId].owner, "AavegotchiFacet: Only owner can lock aavegotchi");
-        s.aavegotchis[_tokenId].unlockTime = block.timestamp + _lockDuration;
-        emit LockAavegotchi(_tokenId, _lockDuration);
+    function _enforceAavegotchiNotForging(uint256 _tokenId) internal {
+        ForgeFacet forgeFacet = ForgeFacet(s.forgeDiamond);
+        require(!forgeFacet.isGotchiForging(_tokenId), "I'M BUSY FORGING DON'T BOTHER ME");
     }
 
     /// @notice Transfers the ownership of an NFT from one address to another address
@@ -533,22 +148,31 @@ contract AavegotchiFacet is LibAppStorageModifiers {
     /// @param _to The new owner
     /// @param _tokenId The NFT to transfer
     /// @param _data Additional data with no specified format, sent in call to `_to`
-    function safeTransferFrom(
-        address _from,
-        address _to,
-        uint256 _tokenId,
-        bytes calldata _data
-    ) external {
-        internalTransferFrom(_from, _to, _tokenId);
-        uint256 size;
-        assembly {
-            size := extcodesize(_to)
-        }
-        if (size > 0) {
-            require(
-                ERC721_RECEIVED == ERC721TokenReceiver(_to).onERC721Received(LibMeta.msgSender(), _from, _tokenId, _data),
-                "ERC721: Transfer rejected/failed by _to"
-            );
+    function safeTransferFrom(address _from, address _to, uint256 _tokenId, bytes calldata _data) external {
+        address sender = LibMeta.msgSender();
+        internalTransferFrom(sender, _from, _to, _tokenId);
+        LibERC721.checkOnERC721Received(sender, _from, _to, _tokenId, _data);
+    }
+
+    // @notice Transfers the ownership of multiple  NFTs from one address to another at once
+    /// @dev Throws unless `LibMeta.msgSender()` is the current owner, an authorized
+    ///  operator, or the approved address of each of the NFTs in `_tokenIds`. Throws if `_from` is
+    ///  not the current owner. Throws if `_to` is the zero address. Throws if one of the NFTs in
+    ///  `_tokenIds` is not a valid NFT. When transfer is complete, this function
+    ///  checks if `_to` is a smart contract (code size > 0). If so, it calls
+    ///  `onERC721Received` on `_to` and throws if the return value is not
+    ///  `bytes4(keccak256("onERC721Received(address,address,uint256,bytes)"))`.
+    /// @param _from The current owner of the NFTs
+    /// @param _to The new owner
+    /// @param _tokenIds An array containing the identifiers of the NFTs to transfer
+    /// @param _data Additional data with no specified format, sent in call to `_to`
+
+    function safeBatchTransferFrom(address _from, address _to, uint256[] calldata _tokenIds, bytes calldata _data) external {
+        address sender = LibMeta.msgSender();
+        for (uint256 index = 0; index < _tokenIds.length; index++) {
+            uint256 _tokenId = _tokenIds[index];
+            internalTransferFrom(sender, _from, _to, _tokenId);
+            LibERC721.checkOnERC721Received(sender, _from, _to, _tokenId, _data);
         }
     }
 
@@ -558,22 +182,10 @@ contract AavegotchiFacet is LibAppStorageModifiers {
     /// @param _from The current owner of the NFT
     /// @param _to The new owner
     /// @param _tokenId The NFT to transfer
-    function safeTransferFrom(
-        address _from,
-        address _to,
-        uint256 _tokenId
-    ) external {
-        internalTransferFrom(_from, _to, _tokenId);
-        uint256 size;
-        assembly {
-            size := extcodesize(_to)
-        }
-        if (size > 0) {
-            require(
-                ERC721_RECEIVED == ERC721TokenReceiver(_to).onERC721Received(LibMeta.msgSender(), _from, _tokenId, ""),
-                "ERC721: Transfer rejected/failed by _to"
-            );
-        }
+    function safeTransferFrom(address _from, address _to, uint256 _tokenId) external {
+        address sender = LibMeta.msgSender();
+        internalTransferFrom(sender, _from, _to, _tokenId);
+        LibERC721.checkOnERC721Received(sender, _from, _to, _tokenId, "");
     }
 
     /// @notice Transfer ownership of an NFT -- THE CALLER IS RESPONSIBLE
@@ -586,40 +198,24 @@ contract AavegotchiFacet is LibAppStorageModifiers {
     /// @param _from The current owner of the NFT
     /// @param _to The new owner
     /// @param _tokenId The NFT to transfer
-    function transferFrom(
-        address _from,
-        address _to,
-        uint256 _tokenId
-    ) external {
-        internalTransferFrom(_from, _to, _tokenId);
+    function transferFrom(address _from, address _to, uint256 _tokenId) external {
+        internalTransferFrom(LibMeta.msgSender(), _from, _to, _tokenId);
     }
 
     // This function is used by transfer functions
-    function internalTransferFrom(
-        address _from,
-        address _to,
-        uint256 _tokenId
-    ) internal {
-        require(_to != address(0), "ER721: Can't transfer to 0 address");
-        address owner = s.aavegotchis[_tokenId].owner;
-        require(owner != address(0), "ERC721: Invalid tokenId or can't be transferred");
+    function internalTransferFrom(address _sender, address _from, address _to, uint256 _tokenId) internal {
+        LibGotchiLending.enforceAavegotchiNotInLending(uint32(_tokenId), _sender);
+        _enforceAavegotchiNotForging(_tokenId);
+
+        require(_to != address(0), "AavegotchiFacet: Can't transfer to 0 address");
+        require(_from != address(0), "AavegotchiFacet: _from can't be 0 address");
+        require(_from == s.aavegotchis[_tokenId].owner, "AavegotchiFacet: _from is not owner, transfer failed");
         require(
-            LibMeta.msgSender() == owner || s.operators[owner][LibMeta.msgSender()] || s.approved[_tokenId] == LibMeta.msgSender(),
+            _sender == _from || s.operators[_from][_sender] || _sender == s.approved[_tokenId],
             "AavegotchiFacet: Not owner or approved to transfer"
         );
-        require(_from == owner, "ERC721: _from is not owner, transfer failed");
-        s.aavegotchis[_tokenId].owner = _to;
-        s.aavegotchiBalance[_from]--;
-        s.aavegotchiBalance[_to]++;
-        if (s.approved[_tokenId] != address(0)) {
-            delete s.approved[_tokenId];
-            emit Approval(owner, address(0), _tokenId);
-        }
-        // unlock if locked
-        if (s.aavegotchis[_tokenId].unlockTime >= block.timestamp) {
-            s.aavegotchis[_tokenId].unlockTime = block.timestamp - 1;
-        }
-        emit Transfer(_from, _to, _tokenId);
+        LibAavegotchi.transfer(_from, _to, _tokenId);
+        LibERC721Marketplace.updateERC721Listing(address(this), _tokenId, _from);
     }
 
     /// @notice Change or reaffirm the approved address for an NFT
@@ -632,7 +228,7 @@ contract AavegotchiFacet is LibAppStorageModifiers {
         address owner = s.aavegotchis[_tokenId].owner;
         require(owner == LibMeta.msgSender() || s.operators[owner][LibMeta.msgSender()], "ERC721: Not owner or operator of token.");
         s.approved[_tokenId] = _approved;
-        emit Approval(owner, _approved, _tokenId);
+        emit LibERC721.Approval(owner, _approved, _tokenId);
     }
 
     /// @notice Enable or disable approval for a third party ("operator") to manage
@@ -643,16 +239,31 @@ contract AavegotchiFacet is LibAppStorageModifiers {
     /// @param _approved True if the operator is approved, false to revoke approval
     function setApprovalForAll(address _operator, bool _approved) external {
         s.operators[LibMeta.msgSender()][_operator] = _approved;
-        emit ApprovalForAll(LibMeta.msgSender(), _operator, _approved);
+        emit LibERC721.ApprovalForAll(LibMeta.msgSender(), _operator, _approved);
     }
 
-    function name() external pure returns (string memory) {
-        return "Aavegotchi";
+    /// @notice Enable or disable approval for a third party("operator") to help pet LibMeta.msgSender()'s gotchis
+    ///@dev Emits the PetOperatorApprovalForAll event
+    ///@param _operator Address to disable/enable as a pet operator
+    ///@param _approved True if operator is approved,False if approval is revoked
+
+    function setPetOperatorForAll(address _operator, bool _approved) external {
+        s.petOperators[LibMeta.msgSender()][_operator] = _approved;
+        emit PetOperatorApprovalForAll(LibMeta.msgSender(), _operator, _approved);
+    }
+
+    ///@notice Return the universal name of the NFT
+
+    function name() external view returns (string memory) {
+        // return "Aavegotchi";
+        return s.name;
     }
 
     /// @notice An abbreviated name for NFTs in this contract
-    function symbol() external pure returns (string memory) {
-        return "GOTCHI";
+
+    function symbol() external view returns (string memory) {
+        //return "GOTCHI";
+        return s.symbol;
     }
 
     /// @notice A distinct Uniform Resource Identifier (URI) for a given asset.
@@ -660,7 +271,6 @@ contract AavegotchiFacet is LibAppStorageModifiers {
     ///  3986. The URI may point to a JSON file that conforms to the "ERC721
     ///  Metadata JSON Schema".
     function tokenURI(uint256 _tokenId) external pure returns (string memory) {
-        string memory uid = LibStrings.uintStr(_tokenId);
-        return string(abi.encodePacked("https://aavegotchi.com/metadata/aavegotchis/", uid)); //Here is your URL!
+        return LibStrings.strWithUint("https://app.aavegotchi.com/metadata/aavegotchis/", _tokenId); //Here is your URL!
     }
 }

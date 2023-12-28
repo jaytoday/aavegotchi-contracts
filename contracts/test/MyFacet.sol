@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.7.6;
+pragma solidity 0.8.1;
 
 import "./AppStorage.sol";
 import "./LibERC20.sol";
@@ -16,7 +16,7 @@ contract MyFacet1 {
     }
 
     function burn(uint256 _value) external {
-        s.transfer(address(0), _value);
+        s.transfer(msg.sender, address(0), _value);
     }
 
     function getName() external view returns (string memory name_) {

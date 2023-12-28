@@ -33,7 +33,7 @@ const collaterals = [
     */
 ]
 
-function eightBitArrayToUint(array) {
+function eightBitArrayToUint (array) {
   const uint = []
   for (const num of array) {
     const value = ethers.BigNumber.from(num).toTwos(8)
@@ -42,7 +42,7 @@ function eightBitArrayToUint(array) {
   return ethers.BigNumber.from('0x' + uint.join(''))
 }
 
-function getCollaterals(network, ghstAddress, testAddress) {
+function getCollaterals (network, ghstAddress, testAddress) {
   const collateralTypes = []
   for (const collateralType of collaterals) {
     const collateralTypeInfo = {
@@ -54,18 +54,25 @@ function getCollaterals(network, ghstAddress, testAddress) {
         '0x' + collateralType.cheekColor.slice(1),
       svgId: collateralType.svgId,
       eyeShapeSvgId: collateralType.eyeShapeSvgId,
-      modifiers: eightBitArrayToUint(collateralType.modifiers),
+      // modifiers: eightBitArrayToUint(collateralType.modifiers),
+      modifiers: collateralType.modifiers,
       conversionRate: collateralType.conversionRate,
       delisted: false
     }
     const item = {}
     if (network === 'kovan') {
       item.collateralType = collateralType.kovanAddress
+    } else if (network === 'mumbai') {
+      if (collateralType.name === 'GHST') {
+        item.collateralType = ghstAddress
+      }
     } else if (network === 'hardhat') {
       if (collateralType.name === 'GHST') item.collateralType = ghstAddress
       else if (collateralType.name === 'TEST') item.collateralType = testAddress
     } else if (network === 'mainnet') {
       item.collateralType = collateralType.mainnetAddress
+    } else if (network === 'matic') {
+      item.collateralTypeInfo = collateralType.maticAddress
     }
     item.collateralTypeInfo = collateralTypeInfo
     collateralTypes.push(item)
